@@ -124,7 +124,7 @@ thread_init (void) {
 	
 	/* ==================== project1 ==================== */
 	list_init(&blocked_list);
-	minimum_wake_tick = INT64_MAX;
+	min_wake_tick = INT64_MAX;
 	/* ==================== project1 ==================== */
 
 	/* Set up a thread structure for the running thread. */
@@ -607,6 +607,7 @@ allocate_tid (void) {
 }
 
 /* ==================== project1 ==================== */
+/* 실행 중인 thread를 sleep/block 상태로 만듭니다. */
 void thread_sleep(int64_t ticks) {
 	struct thread *curr = thread_current();
 	enum intr_level old_level;
@@ -624,16 +625,20 @@ void thread_sleep(int64_t ticks) {
 	intr_set_level(old_level);
 }
 
+/* 최소 틱을 가진 스레드의 tick을 min_wake_tick에 저장합니다. */
 void update_min_tick_to_awake(int64_t ticks) {
-	minimum_wake_tick = MIN(minimum_wake_tick, ticks);
+	min_wake_tick = MIN(min_wake_tick, ticks);
 }
 
+/* 최소 틱을 리턴 합니다. */
 int64_t get_min_tick_to_awake(void) {
-	return minimum_wake_tick;
+	return min_wake_tick;
 }
 
+/* blocked/sleep list를 순회하며 인자로 주어진 ticks 보다 
+   작은 ticks를 가진 thread들을 awake/unblock 합니다 */
 void thread_awake(int64_t ticks) {
-	minimum_wake_tick = INT64_MAX;
+	min_wake_tick = INT64_MAX;
 	struct list_elem *e = list_begin(&blocked_list);
 	struct thread *t;
 	for (e; e != list_end(&blocked_list);) {
