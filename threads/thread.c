@@ -28,6 +28,17 @@
    that are ready to run but not actually running. */
 static struct list ready_list;
 
+/* ==================== project1 ==================== */
+// Block된 스레드 리스트
+static struct list blocked_list;
+
+// Block된 스레드들의 wake_tick중 최솟값
+static int64_t minimum_wake_tick;
+
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+
+/* ==================== project1 ==================== */
+
 /* Idle thread. */
 static struct thread *idle_thread;
 
@@ -109,6 +120,12 @@ thread_init (void) {
 	lock_init (&tid_lock);
 	list_init (&ready_list);
 	list_init (&destruction_req);
+
+	
+	/* ==================== project1 ==================== */
+	list_init(&blocked_list);
+	min_wake_tick = INT64_MAX;
+	/* ==================== project1 ==================== */
 
 	/* Set up a thread structure for the running thread. */
 	initial_thread = running_thread ();
@@ -588,3 +605,51 @@ allocate_tid (void) {
 
 	return tid;
 }
+
+/* ==================== project1 ==================== */
+/* 실행 중인 thread를 sleep/block 상태로 만듭니다. */
+void thread_sleep(int64_t ticks) {
+	struct thread *curr = thread_current();
+	enum intr_level old_level;
+	ASSERT(!intr_context());
+	old_level = intr_disable();
+
+	curr->wake_ticks = ticks;
+
+	if (curr != idle_thread) {
+		list_push_back(&blocked_list, &curr->elem);
+	}
+
+	update_min_tick_to_awake(ticks);
+	do_schedule(THREAD_BLOCKED);
+	intr_set_level(old_level);
+}
+
+/* 최소 틱을 가진 스레드의 tick을 min_wake_tick에 저장합니다. */
+void update_min_tick_to_awake(int64_t ticks) {
+	min_wake_tick = MIN(min_wake_tick, ticks);
+}
+
+/* 최소 틱을 리턴 합니다. */
+int64_t get_min_tick_to_awake(void) {
+	return min_wake_tick;
+}
+
+/* blocked/sleep list를 순회하며 인자로 주어진 ticks 보다 
+   작은 ticks를 가진 thread들을 awake/unblock 합니다 */
+void thread_awake(int64_t ticks) {
+	min_wake_tick = INT64_MAX;
+	struct list_elem *e = list_begin(&blocked_list);
+	struct thread *t;
+	for (e; e != list_end(&blocked_list);) {
+		t = list_entry(e, struct thread, elem);
+		if (t->wake_ticks <= ticks) {
+			e = list_remove(&t->elem);
+			thread_unblock(t);
+		} else {
+			update_min_tick_to_awake(t->wake_ticks);
+			e = list_next(e);
+		}
+	}
+}
+/* ==================== project1 ==================== */
