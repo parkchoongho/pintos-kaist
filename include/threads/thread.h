@@ -95,6 +95,13 @@ struct thread {
 	/* Shared between thread.c and synch.c. */
 	struct list_elem elem;              /* List element. */
 
+	
+	/* ==================== project1 ==================== */
+	/* Wake Up Time Tick (시스템이 시작된 이후부터 언제 일어나야되는지 알려주는 시간) */
+	int64_t wake_ticks;
+	/* ==================== project1 ==================== */
+
+
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
@@ -142,5 +149,12 @@ int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
 void do_iret (struct intr_frame *tf);
+
+/* ==================== project1 ==================== */
+void thread_sleep(int64_t ticks);
+void thread_awake(int64_t ticks);
+void update_min_tick_to_awake(int64_t ticks);
+int64_t get_min_tick_to_awake(void);
+/* ==================== project1 ==================== */
 
 #endif /* threads/thread.h */
