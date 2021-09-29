@@ -95,8 +95,7 @@ timer_sleep (int64_t ticks) {
 	ASSERT (intr_get_level () == INTR_ON);
 
 	/* ==================== project1 ==================== */
-	int64_t wake_tick = start + ticks;
-	thread_sleep(wake_tick);
+	thread_sleep(start + ticks);
 	/* ==================== project1 ==================== */
 	
 }
