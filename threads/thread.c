@@ -30,10 +30,10 @@ static struct list ready_list;
 
 /* ==================== project1 ==================== */
 // Block된 스레드 리스트
-static struct list blocked_list;
+static struct list sleep_list;
 
 // Block된 스레드들의 wake_tick중 최솟값
-static int64_t minimum_wake_tick;
+static int64_t min_wake_tick;
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
@@ -123,7 +123,7 @@ thread_init (void) {
 
 	
 	/* ==================== project1 ==================== */
-	list_init(&blocked_list);
+	list_init(&sleep_list);
 	min_wake_tick = INT64_MAX;
 	/* ==================== project1 ==================== */
 
@@ -617,11 +617,13 @@ void thread_sleep(int64_t ticks) {
 	curr->wake_ticks = ticks;
 
 	if (curr != idle_thread) {
-		list_push_back(&blocked_list, &curr->elem);
+		list_push_back(&sleep_list, &curr->elem);
 	}
 
 	update_min_tick_to_awake(ticks);
-	do_schedule(THREAD_BLOCKED);
+	/* do_schedule 함수는 내부 동작 방식이 thread_block 방식과 유사하므로 내부적으로 더 간결한 thread_block 함수를 사용했습니다.*/
+	// do_schedule(THREAD_BLOCKED);
+	thread_block();
 	intr_set_level(old_level);
 }
 
@@ -639,9 +641,9 @@ int64_t get_min_tick_to_awake(void) {
    작은 ticks를 가진 thread들을 awake/unblock 합니다 */
 void thread_awake(int64_t ticks) {
 	min_wake_tick = INT64_MAX;
-	struct list_elem *e = list_begin(&blocked_list);
+	struct list_elem *e = list_begin(&sleep_list);
 	struct thread *t;
-	for (e; e != list_end(&blocked_list);) {
+	for (e; e != list_end(&sleep_list);) {
 		t = list_entry(e, struct thread, elem);
 		if (t->wake_ticks <= ticks) {
 			e = list_remove(&t->elem);
