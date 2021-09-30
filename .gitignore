@@ -1,1 +1,4 @@
+# 개별 vscode 설정 무시
 .vscode
+# 개별 build된 파일들 무시
+**/build
