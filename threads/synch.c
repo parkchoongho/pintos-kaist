@@ -66,7 +66,10 @@ sema_down (struct semaphore *sema) {
 
 	old_level = intr_disable ();
 	while (sema->value == 0) {
-		list_push_back (&sema->waiters, &thread_current ()->elem);
+		/* ==================== project1 Prioirity Scheduling ==================== */
+		list_insert_ordered(&sema->waiters, &thread_current ()->elem, thread_priority_compare, NULL);
+		//list_push_back (&sema->waiters, &thread_current ()->elem);
+		/* ==================== project1 Prioirity Scheduling ==================== */
 		thread_block ();
 	}
 	sema->value--;
@@ -109,10 +112,21 @@ sema_up (struct semaphore *sema) {
 	ASSERT (sema != NULL);
 
 	old_level = intr_disable ();
-	if (!list_empty (&sema->waiters))
+	if (!list_empty (&sema->waiters)) {
+		/* ==================== project1 Prioirity Scheduling ==================== */
+		list_sort(&sema->waiters, thread_priority_compare, NULL);
+		/* ==================== project1 Prioirity Scheduling ==================== */
 		thread_unblock (list_entry (list_pop_front (&sema->waiters),
-					struct thread, elem));
+					struct thread, elem));		
+	}
 	sema->value++;
+
+	/* ==================== project1 Prioirity Scheduling ==================== */
+	/* thread_create()에서 thread_unblock 이후 처럼 새롭게 ready_list에 thread가
+		추가되었기에 현재 실행되고 있는 thread가 max priority 인지 검증. */
+	test_max_priority();
+	/* ==================== project1 Prioirity Scheduling ==================== */
+
 	intr_set_level (old_level);
 }
 
@@ -188,8 +202,23 @@ lock_acquire (struct lock *lock) {
 	ASSERT (!intr_context ());
 	ASSERT (!lock_held_by_current_thread (lock));
 
+	/* ==================== project1 Priority Donation ==================== */
+	struct thread *cur = thread_current();
+
+	/* 위에서 lock이 현재 thread에게 있는지를 이미 assert했기에 holder가 있다면 다른 thread다.
+		따라서 donation을 통해 lock holder thread가 실행될 수 있게 해준다. */
+	if (lock->holder) {
+		cur->wait_on_lock = lock;
+		/* lock holder의 donation 리스트에 현재 thread를 기록해준다. Priority 순으로 */
+		list_insert_ordered(&lock->holder->donations, &cur->donation_elem, 
+						thread_compare_donate_priority, NULL);
+		donate_priority();
+	}
+
 	sema_down (&lock->semaphore);
-	lock->holder = thread_current ();
+	cur->wait_on_lock = NULL;
+	lock->holder = cur;
+	/* ==================== project1 Priority Donation ==================== */
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -221,6 +250,11 @@ void
 lock_release (struct lock *lock) {
 	ASSERT (lock != NULL);
 	ASSERT (lock_held_by_current_thread (lock));
+
+	/* ==================== project1 Priority Donation ==================== */
+    remove_with_lock (lock);
+    refresh_priority ();	
+	/* ==================== project1 Priority Donation ==================== */
 
 	lock->holder = NULL;
 	sema_up (&lock->semaphore);
@@ -282,7 +316,10 @@ cond_wait (struct condition *cond, struct lock *lock) {
 	ASSERT (lock_held_by_current_thread (lock));
 
 	sema_init (&waiter.semaphore, 0);
-	list_push_back (&cond->waiters, &waiter.elem);
+	/* ==================== project1 Prioirity Scheduling ==================== */
+	list_insert_ordered(&cond->waiters, &waiter.elem, sema_priority_compare, NULL);
+	//list_push_back (&cond->waiters, &waiter.elem);
+	/* ==================== project1 Prioirity Scheduling ==================== */
 	lock_release (lock);
 	sema_down (&waiter.semaphore);
 	lock_acquire (lock);
@@ -302,9 +339,13 @@ cond_signal (struct condition *cond, struct lock *lock UNUSED) {
 	ASSERT (!intr_context ());
 	ASSERT (lock_held_by_current_thread (lock));
 
-	if (!list_empty (&cond->waiters))
+	if (!list_empty (&cond->waiters)){
+		/* ==================== project1 Prioirity Scheduling ==================== */
+		list_sort(&cond->waiters, sema_priority_compare, NULL);
+		/* ==================== project1 Prioirity Scheduling ==================== */
 		sema_up (&list_entry (list_pop_front (&cond->waiters),
 					struct semaphore_elem, elem)->semaphore);
+		}
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by
@@ -321,3 +362,23 @@ cond_broadcast (struct condition *cond, struct lock *lock) {
 	while (!list_empty (&cond->waiters))
 		cond_signal (cond, lock);
 }
+
+/* ==================== project1 Prioirity Scheduling ==================== */
+/* */
+bool
+sema_priority_compare (struct list_elem *a_, struct list_elem *b_, void *aux UNUSED) {
+    struct semaphore_elem *sema_a = list_entry(a_, struct semaphore_elem, elem); 
+	struct semaphore_elem *sema_b = list_entry(b_, struct semaphore_elem, elem); 
+
+	struct list *list_a = &(sema_a->semaphore.waiters);
+    struct list *list_b = &(sema_b->semaphore.waiters);
+
+	struct list_elem *list_elem_a = list_begin(list_a);
+	struct list_elem *list_elem_b = list_begin(list_b);
+
+	struct thread *thread_a = list_entry(list_elem_a, struct thread, elem);
+	struct thread *thread_b = list_entry(list_elem_b, struct thread, elem);
+
+    return thread_a->priority > thread_b->priority;
+}
+/* ==================== project1 Prioirity Scheduling ==================== */

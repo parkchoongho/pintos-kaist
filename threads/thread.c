@@ -121,7 +121,6 @@ thread_init (void) {
 	list_init (&ready_list);
 	list_init (&destruction_req);
 
-	
 	/* ==================== project1 ==================== */
 	list_init(&sleep_list);
 	min_wake_tick = INT64_MAX;
@@ -224,6 +223,12 @@ thread_create (const char *name, int priority,
 	/* Add to run queue. */
 	thread_unblock (t);
 
+	/* ==================== project1 Prioirity Scheduling ==================== */
+	/* 생성된 스레드의 우선순위가 현재 실행중인 스레드의 우선순위보다
+		높다면 CPU를 양보한다. */
+	test_max_priority();
+	/* ==================== project1 Prioirity Scheduling ==================== */
+
 	return tid;
 }
 
@@ -257,7 +262,10 @@ thread_unblock (struct thread *t) {
 
 	old_level = intr_disable ();
 	ASSERT (t->status == THREAD_BLOCKED);
-	list_push_back (&ready_list, &t->elem);
+	/* ==================== project1 Prioirity Scheduling ==================== */
+	list_insert_ordered(&ready_list, &t->elem, thread_priority_compare, NULL);
+	//list_push_back (&ready_list, &t->elem);
+	/* ==================== project1 Prioirity Scheduling ==================== */
 	t->status = THREAD_READY;
 	intr_set_level (old_level);
 }
@@ -320,7 +328,10 @@ thread_yield (void) {
 
 	old_level = intr_disable ();
 	if (curr != idle_thread)
-		list_push_back (&ready_list, &curr->elem);
+		/* ==================== project1 Prioirity Scheduling ==================== */
+		list_insert_ordered(&ready_list, &curr->elem, thread_priority_compare, NULL);
+		//list_push_back (&ready_list, &curr->elem);
+		/* ==================== project1 Prioirity Scheduling ==================== */
 	do_schedule (THREAD_READY);
 	intr_set_level (old_level);
 }
@@ -328,7 +339,11 @@ thread_yield (void) {
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) {
-	thread_current ()->priority = new_priority;
+	/* ==================== project1 Prioirity Scheduling ==================== */
+	thread_current ()->init_priority = new_priority;
+	refresh_priority ();
+	test_max_priority();
+	/* ==================== project1 Prioirity Scheduling ==================== */
 }
 
 /* Returns the current thread's priority. */
@@ -426,6 +441,13 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->tf.rsp = (uint64_t) t + PGSIZE - sizeof (void *);
 	t->priority = priority;
 	t->magic = THREAD_MAGIC;
+
+	/* ==================== project1 Priority Donation ==================== */
+	t->init_priority = priority;
+	t->wait_on_lock = NULL;
+	list_init(&t->donations);
+	/* ==================== project1 Priority Donation ==================== */
+
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
@@ -617,7 +639,10 @@ void thread_sleep(int64_t ticks) {
 	curr->wake_ticks = ticks;
 
 	if (curr != idle_thread) {
-		list_push_back(&sleep_list, &curr->elem);
+		list_insert_ordered(&sleep_list, &curr->elem, thread_priority_compare, NULL);
+
+		// list_push_back(&sleep_list, &curr->elem);
+		// list_sort(&sleep_list, thread_priority_compare, NULL);
 	}
 
 	update_min_tick_to_awake(ticks);
@@ -653,5 +678,94 @@ void thread_awake(int64_t ticks) {
 			e = list_next(e);
 		}
 	}
+}
+
+/* Prioirity Scheduling 
+	Returns true if priority A is higher than priority B, false
+   otherwise. */
+bool
+thread_priority_compare (struct list_elem *a_, struct list_elem *b_, void *aux UNUSED) {
+    struct thread *a = list_entry (a_, struct thread, elem);
+    struct thread *b = list_entry (b_, struct thread, elem);
+    
+    return a->priority > b->priority;
+}
+
+/* Priority Scheduling 
+	실행 중인 thread의 우선 순위와 ready list 안의 최우선 thread의
+	priority를 비교하고, 필요하다면 현재 thread는 yield 한다.
+	1. thread priority 가 변경될 때 콜
+	2. thread_unblock 실행 이후 콜 */
+void test_max_priority (void) {
+	if (list_empty(&ready_list))
+		return;
+	
+	int running_t_priority = thread_current ()->priority;
+	struct list_elem *e = list_begin(&ready_list);
+	struct thread *higest_priority_t = list_entry(e, struct thread, elem);
+	
+	if (running_t_priority < higest_priority_t->priority)
+		thread_yield();
+}
+
+/* Priority Donation */
+bool
+thread_compare_donate_priority (const struct list_elem *l, 
+				const struct list_elem *s, void *aux UNUSED) {
+	return list_entry (l, struct thread, donation_elem)->priority
+			> list_entry (s, struct thread, donation_elem)->priority;
+}
+
+/* 자신의 priority 를 필요한 lock 을 점유하고 있는 스레드에게 빌려주는 함수이다. */
+void
+donate_priority (void) {
+    int depth;
+    struct thread *cur = thread_current ();
+
+	/* Nested donation 상황을 대비해 for문을 돌린다 */
+    for (depth = 0; depth < 8; depth++){
+		/* lock을 얻기 기다리는 thread가 아닐 경우 break한다. */
+		if (!cur->wait_on_lock) break;
+		/* 일 경우 최상위 priority를 donate 해준다. */
+		struct thread *holder = cur->wait_on_lock->holder;
+		holder->priority = cur->priority;
+		cur = holder;
+    }
+}
+
+/* donations 리스트를 순회하며 현재 thread에게 priority를 빌려준 thread들을
+	donation 리스트에서 제거해주는 함수. 다만 현재 release하고 있는 lock 때문에
+	donate한 thread만 해당된다. */
+void
+remove_with_lock (struct lock *lock) {
+    struct list_elem *e;
+    struct thread *cur = thread_current ();
+
+	/* donation 리스트를 순회하며 */
+    for (e = list_begin (&cur->donations); e != list_end (&cur->donations); e = list_next (e)){
+		struct thread *t = list_entry (e, struct thread, donation_elem);
+		/* 인자로 받은 lock을 원해서 donate를 한 경우라면 */
+		if (t->wait_on_lock == lock)
+			list_remove (&t->donation_elem);
+    }
+}
+
+/* 현재 thread의 priority를 원래대로 복구시키거나, 아직 donations 리스트가 비어있지 않다면
+	(아직 나에게 priority를 빌려준 thread들이 남아잇다면) 그중 가장 높은 priority로 재설정. */
+void
+refresh_priority (void) {
+    struct thread *cur = thread_current ();
+
+    cur->priority = cur->init_priority;
+
+	/* donate 받은 priority가 아직 남아있다면 */
+    if (!list_empty (&cur->donations)) {
+		list_sort (&cur->donations, thread_compare_donate_priority, 0);
+
+		/* 그중 가장 높은  priority를 현재 thread의 priority로 설정 */
+    	struct thread *front = list_entry (list_front (&cur->donations), struct thread, donation_elem);
+		if (front->priority > cur->priority)
+			cur->priority = front->priority;
+    }
 }
 /* ==================== project1 ==================== */
