@@ -95,8 +95,17 @@ struct thread {
 	/* Shared between thread.c and synch.c. */
 	struct list_elem elem;              /* List element. */
 
-	
 	/* ==================== project1 ==================== */
+	/* priority donation */
+	/* priority를 양도 받고 반환하고나서 원래 priority를 복원하기 위해 기록*/
+	int init_priority; 
+	/* thread가 현재 얻기 위해 기다리고 있는 lock 으로 스레드는 이 lock 이 release 되기를 기다린다. */
+	struct lock *wait_on_lock; 
+	/* 자신에게 priority 를 나누어준 thread들의 리스트이고 */
+	struct list donations; 
+	 /*  donations 리스트를 관리하기 위한 element 로 thread 구조체의 그냥 elem 과 구분하여 사용하도록 한다. */
+	struct list_elem donation_elem;
+	
 	/* Wake Up Time Tick (시스템이 시작된 이후부터 언제 일어나야되는지 알려주는 시간) */
 	int64_t wake_ticks;
 	/* ==================== project1 ==================== */
@@ -155,6 +164,16 @@ void thread_sleep(int64_t ticks);
 void thread_awake(int64_t ticks);
 void update_min_tick_to_awake(int64_t ticks);
 int64_t get_min_tick_to_awake(void);
+
+/* Prioirity Scheduling  */
+bool thread_priority_compare (struct list_elem *a_, struct list_elem *b_, void *aux UNUSED); 
+void test_max_priority (void); 
+
+/* Priority Donation */
+bool thread_compare_donate_priority (const struct list_elem *l, const struct list_elem *s, void *aux UNUSED);
+void donate_priority (void);
+void remove_with_lock (struct lock *lock);
+void refresh_priority (void);
 /* ==================== project1 ==================== */
 
 #endif /* threads/thread.h */
