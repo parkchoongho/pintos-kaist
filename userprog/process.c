@@ -17,6 +17,7 @@
 #include "threads/thread.h"
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
+#include "threads/synch.h" // for process_wait
 #include "intrinsic.h"
 #ifdef VM
 #include "vm/vm.h"
@@ -26,6 +27,15 @@ static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
+
+/* ==================== project2.3 process control (fork) ==================== */
+// Project2-extra
+struct MapElem
+{
+	uintptr_t key;
+	uintptr_t value;
+};
+/* ==================== project2.3 process control (fork) ==================== */
 
 /* General process initializer for initd and other process. */
 static void
@@ -42,6 +52,8 @@ tid_t
 process_create_initd (const char *file_name) {
 	char *fn_copy;
 	tid_t tid;
+	/* ==================== project2 Argument Passing ==================== */
+	char *program_name, *save_ptr;
 
 	/* Make a copy of FILE_NAME.
 	 * Otherwise there's a race between the caller and load(). */
@@ -50,8 +62,15 @@ process_create_initd (const char *file_name) {
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
 
+	/* ==================== project2 Argument Passing ==================== */
+	/**** PARSE command-line and GET program-name, which is first token ****/
+    /* using strtok_r */
+	program_name = strtok_r(file_name, " ", &save_ptr);
+	/* ==================== project2 Argument Passing ==================== */
+
 	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
+	tid = thread_create (program_name, PRI_DEFAULT, initd, fn_copy);
+
 	if (tid == TID_ERROR)
 		palloc_free_page (fn_copy);
 	return tid;
@@ -64,20 +83,62 @@ initd (void *f_name) {
 	supplemental_page_table_init (&thread_current ()->spt);
 #endif
 
-	process_init ();
+	// process_init ();
 
 	if (process_exec (f_name) < 0)
 		PANIC("Fail to launch initd\n");
 	NOT_REACHED ();
 }
 
+/* ==================== project2.3 process control (fork) ==================== */
+// Search current thread's child_list and return child with pid. Return NULL if not found.
+struct thread *get_child_with_pid(int pid)
+{
+	struct thread *cur = thread_current();
+	struct list *child_list = &cur->child_list;
+
+#ifdef DEBUG_WAIT
+	//printf("\nparent children # : %d\n", list_size(child_list));
+#endif
+
+	for (struct list_elem *e = list_begin(child_list); e != list_end(child_list); e = list_next(e))
+	{
+		struct thread *t = list_entry(e, struct thread, child_elem);
+		if (t->tid == pid)
+			return t;
+	}
+	return NULL;
+}
+/* ==================== project2.3 process control (fork) ==================== */
+
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
 tid_t
 process_fork (const char *name, struct intr_frame *if_ UNUSED) {
 	/* Clone current thread to new thread.*/
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+	/* ==================== project2.3 process control (fork) ==================== */
+	struct thread *cur = thread_current();
+	// Pass this intr_frame down to child
+	memcpy(&cur->parent_if, if_, sizeof(struct intr_frame));
+
+	tid_t tid = thread_create(name, PRI_DEFAULT, __do_fork, cur);
+	if (tid == TID_ERROR)
+		return TID_ERROR;
+
+	// Search current thread's child_list and return child with pid. Return NULL if not found.
+	struct thread *child = get_child_with_pid(tid);
+
+	// wait until child loads
+	sema_down(&child->fork_sema);
+	if (child->exit_status == -1)
+		return TID_ERROR;
+
+#ifdef DEBUG_WAIT
+	printf("[process_fork] pid %d : child %s\n", tid, child->name);
+#endif
+
+	return tid;
+	/* ==================== project2.3 process control (fork) ==================== */
 }
 
 #ifndef VM
@@ -92,22 +153,44 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	bool writable;
 
 	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+	if (is_kernel_vaddr(va))
+	{
+
+		return true; // return false ends pml4_for_each, which is undesirable - just return true to pass this kernel va
+	}
 
 	/* 2. Resolve VA from the parent's page map level 4. */
-	parent_page = pml4_get_page (parent->pml4, va);
+	parent_page = pml4_get_page(parent->pml4, va);
+	if (parent_page == NULL)
+	{
+		printf("[fork-duplicate] failed to fetch page for user vaddr 'va'\n"); // #ifdef DEBUG
+		return false;
+	}
 
 	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
 	 *    TODO: NEWPAGE. */
+	newpage = palloc_get_page(PAL_USER);
+	if (newpage == NULL)
+	{
+		printf("[fork-duplicate] failed to palloc new page\n"); // #ifdef DEBUG
+		return false;
+	}
 
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
 	 *    TODO: according to the result). */
+	memcpy(newpage, parent_page, PGSIZE);
+	writable = is_writable(pte); // *PTE is an address that points to parent_page
 
 	/* 5. Add new page to child's page table at address VA with WRITABLE
 	 *    permission. */
-	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
+	if (!pml4_set_page(current->pml4, va, newpage, writable))
+	{
 		/* 6. TODO: if fail to insert page, do error handling. */
+		printf("Failed to map user virtual page to given physical frame\n"); // #ifdef DEBUG
+		return false;
 	}
+
 	return true;
 }
 #endif
@@ -123,10 +206,21 @@ __do_fork (void *aux) {
 	struct thread *current = thread_current ();
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
 	struct intr_frame *parent_if;
+	/* project2.3 process control (fork) */
+	parent_if = &parent->parent_if;
+
 	bool succ = true;
+
+	/* ==================== project2.3 process control (fork) ==================== */
+#ifdef DEBUG
+	printf("[Fork] Forking from %s to %s\n", parent->name, current->name);
+#endif
+	/* ==================== project2.3 process control (fork) ==================== */
 
 	/* 1. Read the cpu context to local stack. */
 	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+	/* project2.3 process control (fork) */
+	if_.R.rax = 0; // fork return value for child
 
 	/* 2. Duplicate PT */
 	current->pml4 = pml4_create();
@@ -149,20 +243,83 @@ __do_fork (void *aux) {
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
 
-	process_init ();
+	/* ==================== project2.3 process control (fork) ==================== */
+
+	// multi-oom) Failed to duplicate?
+	if (parent->fdIdx == FDCOUNT_LIMIT)
+		goto error;
+
+	// Project2-extra) multiple fds sharing same file - use associative map (e.g. dict, hashmap) to duplicate these relationships
+	// other test-cases like multi-oom don't need this feature
+	const int MAPLEN = 10;
+	struct MapElem map[10]; // key - parent's struct file * , value - child's newly created struct file *
+	int dupCount = 0;		// index for filling map
+
+	for (int i = 0; i < FDCOUNT_LIMIT; i++)
+	{
+		struct file *file = parent->fdTable[i];
+		if (file == NULL)
+			continue;
+
+		// Project2-extra) linear search on key-pair array
+		// If 'file' is already duplicated in child, don't duplicate again but share it
+		bool found = false;
+		for (int j = 0; j < MAPLEN; j++)
+		{
+			if (map[j].key == file)
+			{
+				found = true;
+				current->fdTable[i] = map[j].value;
+				break;
+			}
+		}
+		if (!found)
+		{
+			struct file *new_file;
+			if (file > 2)
+				new_file = file_duplicate(file);
+			else
+				new_file = file; // 1 STDIN, 2 STDOUT
+
+			current->fdTable[i] = new_file;
+			if (dupCount < MAPLEN)
+			{
+				map[dupCount].key = file;
+				map[dupCount++].value = new_file;
+			}
+		}
+	}
+
+	current->fdIdx = parent->fdIdx;
+
+#ifdef DEBUG
+	printf("[do_fork] %s Ready to switch!\n", current->name);
+#endif
+
+	// child loaded successfully, wake up parent in process_fork
+	sema_up(&current->fork_sema);
 
 	/* Finally, switch to the newly created process. */
 	if (succ)
-		do_iret (&if_);
+		do_iret(&if_);
+
 error:
-	thread_exit ();
+	current->exit_status = TID_ERROR;
+	sema_up(&current->fork_sema);
+	exit(TID_ERROR);
+
+	/* ==================== project2.3 process control (fork) ==================== */
 }
 
 /* Switch the current execution context to the f_name.
  * Returns -1 on fail. */
 int
 process_exec (void *f_name) {
+	/* ==================== project2 Argument Passing ==================== */
 	char *file_name = f_name;
+    char *file_name_copy[64];
+    memcpy(file_name_copy, file_name, strlen(file_name) + 1);
+	/* ==================== project2 Argument Passing ==================== */
 	bool success;
 
 	/* We cannot use the intr_frame in the thread structure.
@@ -176,13 +333,36 @@ process_exec (void *f_name) {
 	/* We first kill the current context */
 	process_cleanup ();
 
+	/* ==================== project2 Argument Passing ==================== */
+	char *token, *last;
+    int token_count = 0;
+    char *arg_list[64];
+
+    token = strtok_r(file_name_copy, " ", &last);
+    char *tmp_save = token;
+    arg_list[token_count] = token;
+
+    while (token != NULL)
+    {
+        token = strtok_r(NULL, " ", &last);
+        token_count++;
+        arg_list[token_count] = token;
+    }
+
 	/* And then load the binary */
-	success = load (file_name, &_if);
+	success = load (tmp_save, &_if);
 
 	/* If load failed, quit. */
-	palloc_free_page (file_name);
-	if (!success)
+	
+	if (!success){
+		palloc_free_page (file_name);
 		return -1;
+	}
+	
+	argument_stack(arg_list, token_count, &_if);
+	/* ==================== project2 Argument Passing ==================== */
+
+	palloc_free_page (file_name);
 
 	/* Start switched process. */
 	do_iret (&_if);
@@ -204,7 +384,30 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
-	return -1;
+
+	/* ==================== project2 process control (wait) ==================== */
+	struct thread *cur = thread_current();
+	struct thread *child = get_child_with_pid(child_tid);
+
+	// [Fail] Not my child
+	if (child == NULL)
+		return -1;
+
+	// Parent waits until child signals (sema_up) after its execution
+	sema_down(&child->wait_sema);
+
+	int exit_status = child->exit_status;
+
+	// Q. 자식 프로세스의 프로세스 디스크립터 삭제??
+	// 아마 thread_create에서 palloc 한거 free 하라는 소리인 것 같다
+	// -> do_schedule에서. 너무 일찍하면 exit_status같은거 날라감
+
+	// Keep child page so parent can get exit_status
+	list_remove(&child->child_elem);
+	sema_up(&child->free_sema); // wake-up child in process_exit - proceed with thread_exit
+	return exit_status;
+
+	/* ==================== project2 process control (wait) ==================== */
 }
 
 /* Exit the process. This function is called by thread_exit (). */
@@ -216,7 +419,29 @@ process_exit (void) {
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
 
-	process_cleanup ();
+	/* ==================== project2 process control (exit) ==================== */
+	struct thread *cur = thread_current();
+
+	// P2-4 Close all opened files
+	for (int i = 0; i < FDCOUNT_LIMIT; i++)
+	{
+		close(i);
+	}
+
+	//palloc_free_page(cur->fdTable);
+	palloc_free_multiple(cur->fdTable, FDT_PAGES); // multi-oom
+
+	// P2-5 Close current executable run by this process
+	file_close(cur->running);
+
+	process_cleanup();
+
+	// Wake up blocked parent
+	sema_up(&cur->wait_sema);
+	// Postpone child termination until parents receives its exit status with 'wait'
+	sema_down(&cur->free_sema);
+	/* ==================== project2 process control (exit) ==================== */
+	
 }
 
 /* Free the current process's resources. */
@@ -342,6 +567,12 @@ load (const char *file_name, struct intr_frame *if_) {
 		goto done;
 	}
 
+	/* ==================== project2 file management ==================== */
+	// Project 2-5. Deny writes to running exec
+	t->running = file;
+	file_deny_write(file);
+	/* ==================== project2 file management ==================== */
+
 	/* Read and verify executable header. */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
 			|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
@@ -421,7 +652,8 @@ load (const char *file_name, struct intr_frame *if_) {
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	file_close (file);
+	// project 2 file close 주석처리 // close current running - at process_exit
+	// file_close (file);
 	return success;
 }
 
@@ -469,6 +701,48 @@ validate_segment (const struct Phdr *phdr, struct file *file) {
 	/* It's okay. */
 	return true;
 }
+
+/* ==================== project2 Argument Passing ==================== */
+void 
+argument_stack(char **argv, int argc, struct intr_frame *if_) {
+    /* insert arguments' address */
+    char *argu_address[128];
+    for (int i = argc - 1; i >= 0; i--)
+    {
+        int argv_len = strlen(argv[i]);
+        if_->rsp = if_->rsp - (argv_len + 1);
+        memcpy(if_->rsp, argv[i], argv_len + 1);
+        argu_address[i] = if_->rsp;
+    }
+    
+    /* insert padding for word-align */
+    while (if_->rsp % 8 != 0)
+    {
+        if_->rsp--;
+        *(uint8_t *)(if_->rsp) = 0;
+    }
+    
+    /* insert address of strings including sentinel */
+    for (int i = argc; i >= 0; i--)
+    {
+        if_->rsp = if_->rsp - 8;
+        if (i == argc)
+            memset(if_->rsp, 0, sizeof(char **));
+        else
+            memcpy(if_->rsp, &argu_address[i], sizeof(char **));
+    }
+    
+    /* fake return address */
+    if_->rsp = if_->rsp - 8;
+    memset(if_->rsp, 0, sizeof(void *));
+
+    if_->R.rdi = argc;
+    if_->R.rsi = if_->rsp + 8;
+
+	// print userstack
+	// hex_dump(if_->rsp, if_->rsp, USER_STACK - if_->rsp, true);
+}
+/* ==================== project2 Argument Passing ==================== */
 
 #ifndef VM
 /* Codes of this block will be ONLY USED DURING project 2.

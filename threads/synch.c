@@ -114,6 +114,7 @@ sema_up (struct semaphore *sema) {
 	old_level = intr_disable ();
 	if (!list_empty (&sema->waiters)) {
 		/* ==================== project1 Prioirity Scheduling ==================== */
+		/* 그전에 빼온 것에 영향을 받았을 수 있기에 정렬을 해줍니다. */
 		list_sort(&sema->waiters, thread_priority_compare, NULL);
 		/* ==================== project1 Prioirity Scheduling ==================== */
 		thread_unblock (list_entry (list_pop_front (&sema->waiters),
